@@ -1,5 +1,5 @@
 //@version=6
-indicator("Markov Regime Enhanced v2", overlay=false, max_bars_back=500, shorttitle="Markov v2")
+indicator("Markov Regime Enhanced v3", overlay=false, max_bars_back=500, shorttitle="Markov v3")
 
 // --- INPUTS ---
 lookback         = input.int(21,    "Lookback Bars",           minval=5,  maxval=100)
@@ -27,6 +27,8 @@ log_return     = math.log(close / close[lookback]) * 100
 current_regime = log_return > bull_threshold ? 1 : log_return < -bear_threshold ? -1 : 0
 
 // --- TRANSITION-ZAEHLUNG ---
+// Benennung: from_bull_total, from_bear_total, from_side_total
+// beschreibt Uebergaenge AUS dem jeweiligen Regime heraus (Zeilensumme)
 float bb = 0, bn = 0, bc = 0
 float nb = 0, nn = 0, nc = 0
 float cb = 0, cn = 0, cc = 0
@@ -56,13 +58,14 @@ for i = 1 to lookback
         else
             cc += 1
 
-bull_total = bb + bn + bc
-bear_total = cb + cn + cc
-side_total = nb + nn + nc
+// Zeilensummen: Uebergaenge AUS dem jeweiligen Regime
+from_bull_total = bb + bn + bc
+from_bear_total = cb + cn + cc
+from_side_total = nb + nn + nc
 
-bull_sticky_raw = bull_total > 0 ? bb / bull_total * 100 : 50.0
-bear_sticky_raw = bear_total > 0 ? cc / bear_total * 100 : 50.0
-side_sticky_raw = side_total > 0 ? nn / side_total * 100 : 50.0
+bull_sticky_raw = from_bull_total > 0 ? bb / from_bull_total * 100 : 50.0
+bear_sticky_raw = from_bear_total > 0 ? cc / from_bear_total * 100 : 50.0
+side_sticky_raw = from_side_total > 0 ? nn / from_side_total * 100 : 50.0
 
 bull_sticky = ta.ema(bull_sticky_raw, smooth_len)
 bear_sticky = ta.ema(bear_sticky_raw, smooth_len)
@@ -75,18 +78,21 @@ bear_to_bull   = prev_regime == -1 and current_regime == 1
 bull_weakening = current_regime == 1 and bull_sticky < sticky_warn_bull
 
 // --- ALERT-BEDINGUNGEN ---
-bull_sticky_warning = bull_sticky < sticky_warn_bull and bull_sticky[1] >= sticky_warn_bull
-bear_sticky_warning = bear_sticky > sticky_warn_bear and bear_sticky[1] <= sticky_warn_bear
-direct_reversal     = bull_to_bear or bear_to_bull
+// Alle Alerts als Flanken-Trigger (nur beim Uebergang, nicht dauerhaft)
+bull_sticky_warning  = bull_sticky  < sticky_warn_bull and bull_sticky[1]  >= sticky_warn_bull
+bear_sticky_warning  = bear_sticky  > sticky_warn_bear and bear_sticky[1]  <= sticky_warn_bear
+direct_reversal      = bull_to_bear or bear_to_bull
+// bull_weakening_alert: nur beim ersten Bar des Uebergangs in den Schwaeche-Zustand
+bull_weakening_alert = bull_weakening and not (current_regime[1] == 1 and bull_sticky[1] < sticky_warn_bull)
 
-alertcondition(bull_sticky_warning, title="Bull-Stickiness gefallen",
-     message="WARNUNG: Bull-Persistenz fuer {{ticker}} unter Schwelle!")
-alertcondition(bear_sticky_warning, title="Bear-Regime festigt sich",
+alertcondition(bull_sticky_warning,  title="Bull-Stickiness gefallen",
+     message="WARNUNG: Bull-Persistenz fuer {{ticker}} unter Schwelle. Regime-Wechsel moeglich!")
+alertcondition(bear_sticky_warning,  title="Bear-Regime festigt sich",
      message="ACHTUNG: Bear-Persistenz fuer {{ticker}} ueber Schwelle!")
-alertcondition(direct_reversal,     title="Direkter Regime-Wechsel",
+alertcondition(direct_reversal,      title="Direkter Regime-Wechsel",
      message="DIREKTER WECHSEL bei {{ticker}}: Bull-Bear oder Bear-Bull!")
-alertcondition(bull_weakening,      title="Bull-Regime schwaechelt",
-     message="Bull aktiv aber Stickiness schwach bei {{ticker}}. Vorsicht!")
+alertcondition(bull_weakening_alert, title="Bull-Regime schwaechelt",
+     message="Bull aktiv aber Stickiness erstmals unter Warnschwelle bei {{ticker}}. Vorsicht!")
 
 // --- HINTERGRUND ---
 bg_col = current_regime == 1  ? color.new(color.green, 88) :
@@ -94,12 +100,12 @@ bg_col = current_regime == 1  ? color.new(color.green, 88) :
          color.new(color.gray, 92)
 bgcolor(show_regime_bg and not tf_too_short ? bg_col : na)
 
-// --- REFERENZLINIEN (feste Werte, kein hline mit dynamischem price) ---
+// --- REFERENZLINIEN ---
 hline(80, "Sehr klebrig",  color=color.new(color.gray, 60), linestyle=hline.style_dotted)
 hline(60, "Moderat",       color=color.new(color.gray, 50), linestyle=hline.style_dashed)
 hline(40, "Schwach",       color=color.new(color.gray, 50), linestyle=hline.style_dashed)
 
-// Bull-Warnschwelle als plot statt hline (darf dynamisch sein)
+// Bull-Warnschwelle als plot (dynamisch, daher kein hline moeglich)
 plot(sticky_warn_bull, "Bull-Warnschwelle",
      color=color.new(color.green, 30), linewidth=1, style=plot.style_line)
 
@@ -157,22 +163,22 @@ if barstate.islast
         regime_col = current_regime == 1 ? color.green : current_regime == -1 ? color.red : color.gray
         warn_str   = bull_weakening ? "JA - Vorsicht!" : "nein"
         warn_col   = bull_weakening ? color.orange : color.gray
-        table.cell(info, 0, 0, "Regime",          text_color=color.silver, text_size=size.small)
-        table.cell(info, 1, 0, regime_str,         text_color=regime_col,   text_size=size.small)
-        table.cell(info, 0, 1, "Bull Sticky",      text_color=color.silver, text_size=size.small)
+        table.cell(info, 0, 0, "Regime",           text_color=color.silver, text_size=size.small)
+        table.cell(info, 1, 0, regime_str,          text_color=regime_col,   text_size=size.small)
+        table.cell(info, 0, 1, "Bull Sticky",       text_color=color.silver, text_size=size.small)
         table.cell(info, 1, 1, str.tostring(bull_sticky, "#.1f") + "%",
              text_color=bull_sticky < sticky_warn_bull ? color.orange : color.green, text_size=size.small)
-        table.cell(info, 0, 2, "Bear Sticky",      text_color=color.silver, text_size=size.small)
+        table.cell(info, 0, 2, "Bear Sticky",       text_color=color.silver, text_size=size.small)
         table.cell(info, 1, 2, str.tostring(bear_sticky, "#.1f") + "%",
              text_color=bear_sticky > sticky_warn_bear ? color.red : color.gray, text_size=size.small)
-        table.cell(info, 0, 3, "Side Sticky",      text_color=color.silver, text_size=size.small)
+        table.cell(info, 0, 3, "Side Sticky",       text_color=color.silver, text_size=size.small)
         table.cell(info, 1, 3, str.tostring(side_sticky, "#.1f") + "%",
              text_color=color.gray, text_size=size.small)
-        table.cell(info, 0, 4, "Bull schwaechelt", text_color=color.silver, text_size=size.small)
-        table.cell(info, 1, 4, warn_str,           text_color=warn_col,     text_size=size.small)
-        table.cell(info, 0, 5, "Timeframe",        text_color=color.silver, text_size=size.small)
+        table.cell(info, 0, 4, "Bull schwaechelt",  text_color=color.silver, text_size=size.small)
+        table.cell(info, 1, 4, warn_str,            text_color=warn_col,     text_size=size.small)
+        table.cell(info, 0, 5, "Timeframe",         text_color=color.silver, text_size=size.small)
         table.cell(info, 1, 5, str.tostring(math.round(tf_minutes)) + " min (ok)",
              text_color=color.green, text_size=size.small)
-        table.cell(info, 0, 6, "Lookback",         text_color=color.silver, text_size=size.small)
+        table.cell(info, 0, 6, "Lookback",          text_color=color.silver, text_size=size.small)
         table.cell(info, 1, 6, str.tostring(lookback) + " Bars",
              text_color=color.silver, text_size=size.small)
