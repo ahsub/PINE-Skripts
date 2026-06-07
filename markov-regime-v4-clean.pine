@@ -1,0 +1,266 @@
+//@version=6
+indicator("Markov Regime Enhanced v4", overlay=false, max_bars_back=500, shorttitle="Markov v4")
+
+// --- INPUTS ---
+lookback         = input.int(21,    "Lookback Bars",           minval=5,  maxval=100)
+bull_threshold   = input.float(3.0, "Bull-Schwelle %",         minval=0.5, maxval=10, step=0.5)
+bear_threshold   = input.float(3.0, "Bear-Schwelle %",         minval=0.5, maxval=10, step=0.5)
+sticky_warn_bull = input.float(60.0,"Bull-Warn-Schwelle %",    minval=20, maxval=95,  step=5)
+sticky_warn_bear = input.float(55.0,"Bear-Warn-Schwelle %",    minval=20, maxval=95,  step=5)
+smooth_len       = input.int(5,     "Glaettung EMA",           minval=1,  maxval=20)
+show_bull_line   = input.bool(true, "Bull-Stickiness anzeigen")
+show_bear_line   = input.bool(true, "Bear-Stickiness anzeigen")
+show_side_line   = input.bool(false,"Sideways-Stickiness anzeigen")
+show_regime_bg   = input.bool(true, "Hintergrund nach Regime")
+show_transitions = input.bool(true, "Regime-Wechsel markieren")
+warn_intensity   = input.string("Stark", "Warn-Intensitaet", options=["Schwach","Mittel","Stark"])
+
+// --- TIMEFRAME-VALIDIERUNG ---
+tf_minutes      = timeframe.in_seconds() / 60
+min_tf_minutes  = 1950.0 / lookback
+tf_too_short    = tf_minutes < min_tf_minutes
+recommended_tf  = min_tf_minutes < 60   ? str.tostring(math.round(min_tf_minutes)) + " min" :
+                  min_tf_minutes < 1440 ? str.tostring(math.round(min_tf_minutes / 60)) + "H" : "Daily"
+
+// --- REGIME-KLASSIFIKATION ---
+log_return     = math.log(close / close[lookback]) * 100
+current_regime = log_return > bull_threshold ? 1 : log_return < -bear_threshold ? -1 : 0
+
+// --- TRANSITION-ZAEHLUNG ---
+float bb = 0, bn = 0, bc = 0
+float nb = 0, nn = 0, nc = 0
+float cb = 0, cn = 0, cc = 0
+
+for i = 1 to lookback
+    prev = current_regime[i]
+    curr = current_regime[i - 1]
+    if prev == 1
+        if curr == 1
+            bb += 1
+        else if curr == 0
+            bn += 1
+        else
+            bc += 1
+    else if prev == 0
+        if curr == 1
+            nb += 1
+        else if curr == 0
+            nn += 1
+        else
+            nc += 1
+    else
+        if curr == 1
+            cb += 1
+        else if curr == 0
+            cn += 1
+        else
+            cc += 1
+
+from_bull_total = bb + bn + bc
+from_bear_total = cb + cn + cc
+from_side_total = nb + nn + nc
+
+bull_sticky_raw = from_bull_total > 0 ? bb / from_bull_total * 100 : 50.0
+bear_sticky_raw = from_bear_total > 0 ? cc / from_bear_total * 100 : 50.0
+side_sticky_raw = from_side_total > 0 ? nn / from_side_total * 100 : 50.0
+
+bull_sticky = ta.ema(bull_sticky_raw, smooth_len)
+bear_sticky = ta.ema(bear_sticky_raw, smooth_len)
+side_sticky = ta.ema(side_sticky_raw, smooth_len)
+
+// --- REGIME-WECHSEL ---
+prev_regime    = current_regime[1]
+bull_to_bear   = prev_regime == 1  and current_regime == -1
+bear_to_bull   = prev_regime == -1 and current_regime == 1
+bull_weakening = current_regime == 1 and bull_sticky < sticky_warn_bull
+bear_rising    = current_regime == -1 and bear_sticky > sticky_warn_bear
+
+// --- WARNSTUFEN ---
+// Abstand zur Warnschwelle bestimmt Intensitaet
+bull_warn_gap  = sticky_warn_bull - bull_sticky  // positiv = unter Schwelle
+bear_warn_gap  = bear_sticky - sticky_warn_bear  // positiv = ueber Schwelle
+
+// Warnstufen: 1=leicht, 2=mittel, 3=kritisch
+bull_warn_level = bull_weakening ? (bull_warn_gap > 15 ? 3 : bull_warn_gap > 8 ? 2 : 1) : 0
+bear_warn_level = bear_rising    ? (bear_warn_gap > 15 ? 3 : bear_warn_gap > 8 ? 2 : 1) : 0
+warn_level      = math.max(bull_warn_level, bear_warn_level)
+
+// Blink-Effekt: alterniert jeden Bar wenn Warnung aktiv
+// Frequenz steigt mit Warnstufe
+blink_fast   = bar_index % 2 == 0   // jeden 2. Bar
+blink_medium = bar_index % 4 == 0   // jeden 4. Bar
+blink_slow   = bar_index % 6 == 0   // jeden 6. Bar
+
+blink_active = warn_level == 3 ? blink_fast :
+               warn_level == 2 ? blink_medium :
+               warn_level == 1 ? blink_slow : false
+
+// --- ALERT-BEDINGUNGEN (Flanken-Trigger) ---
+bull_sticky_warning  = bull_sticky < sticky_warn_bull and bull_sticky[1] >= sticky_warn_bull
+bear_sticky_warning  = bear_sticky > sticky_warn_bear and bear_sticky[1] <= sticky_warn_bear
+direct_reversal      = bull_to_bear or bear_to_bull
+bull_weakening_alert = bull_weakening and not (current_regime[1] == 1 and bull_sticky[1] < sticky_warn_bull)
+
+alertcondition(bull_sticky_warning,  title="Bull-Stickiness gefallen",
+     message="WARNUNG: Bull-Persistenz fuer {{ticker}} unter Schwelle. Regime-Wechsel moeglich!")
+alertcondition(bear_sticky_warning,  title="Bear-Regime festigt sich",
+     message="ACHTUNG: Bear-Persistenz fuer {{ticker}} ueber Schwelle!")
+alertcondition(direct_reversal,      title="Direkter Regime-Wechsel",
+     message="DIREKTER WECHSEL bei {{ticker}}: Bull-Bear oder Bear-Bull!")
+alertcondition(bull_weakening_alert, title="Bull-Regime schwaechelt",
+     message="Bull aktiv aber Stickiness erstmals unter Warnschwelle bei {{ticker}}. Vorsicht!")
+
+// --- HINTERGRUND ---
+// Normal: gedaempfte Regime-Farbe
+// Warnung: Blink-Effekt mit staerkerer Farbe
+bg_normal = current_regime == 1  ? color.new(color.green, 88) :
+            current_regime == -1 ? color.new(color.red,   88) :
+            color.new(color.gray, 92)
+
+// Warnfarben nach Stufe
+bg_warn_3 = bull_weakening ? color.new(color.orange, 60) : color.new(color.red, 60)
+bg_warn_2 = bull_weakening ? color.new(color.orange, 72) : color.new(color.red, 72)
+bg_warn_1 = bull_weakening ? color.new(color.orange, 82) : color.new(color.red, 82)
+
+bg_col = not tf_too_short and show_regime_bg ?
+         (warn_level == 3 and blink_active ? bg_warn_3 :
+          warn_level == 2 and blink_active ? bg_warn_2 :
+          warn_level == 1 and blink_active ? bg_warn_1 :
+          bg_normal) : na
+
+bgcolor(bg_col, title="Regime-Hintergrund")
+
+// --- REFERENZLINIEN ---
+hline(80, "Sehr klebrig",  color=color.new(color.gray, 60), linestyle=hline.style_dotted)
+hline(60, "Moderat",       color=color.new(color.gray, 50), linestyle=hline.style_dashed)
+hline(40, "Schwach",       color=color.new(color.gray, 50), linestyle=hline.style_dashed)
+plot(sticky_warn_bull, "Bull-Warnschwelle",
+     color=color.new(color.green, 30), linewidth=1, style=plot.style_line)
+
+// --- STICKINESS PLOTS ---
+// Bull-Linie: normal gruen, bei Warnung orange/rot je nach Stufe
+bull_line_col = bull_warn_level == 3 ? color.new(color.red,    0) :
+                bull_warn_level == 2 ? color.new(color.orange, 0) :
+                bull_warn_level == 1 ? color.new(color.yellow, 0) :
+                color.new(color.green, 0)
+
+// Linienbreite steigt mit Warnstufe
+bull_line_width = bull_warn_level >= 2 ? 3 : bull_warn_level == 1 ? 2 : 2
+
+plot(show_bull_line and not tf_too_short ? bull_sticky : na,
+     title="Bull Stickiness", color=bull_line_col, linewidth=bull_line_width)
+
+plot(show_bear_line and not tf_too_short ? bear_sticky : na,
+     title="Bear Stickiness",
+     color=bear_warn_level > 0 ? color.new(color.red, 0) : color.new(color.red, 30),
+     linewidth=bear_warn_level >= 2 ? 3 : 2)
+
+plot(show_side_line and not tf_too_short ? side_sticky : na,
+     title="Sideways Stickiness", color=color.new(color.gray, 20), linewidth=1)
+
+// Warnzone: Bull-Stickiness unter Schwelle - blinkende dicke Linie
+warn_line_col = warn_level == 3 ? (blink_active ? color.new(color.red,    0) : color.new(color.red,    60)) :
+                warn_level == 2 ? (blink_active ? color.new(color.orange, 0) : color.new(color.orange, 60)) :
+                warn_level == 1 ? (blink_active ? color.new(color.yellow, 0) : color.new(color.yellow, 70)) :
+                na
+
+plot(bull_weakening and not tf_too_short ? bull_sticky : na,
+     title="WARN Overlay", color=warn_line_col, linewidth=4)
+
+// --- REGIME-WECHSEL MARKER ---
+plotshape(show_transitions and bull_to_bear and not tf_too_short ? bear_sticky : na,
+     title="Bull-Bear Wechsel", location=location.absolute,
+     style=shape.xcross, color=color.red, size=size.large)
+
+plotshape(show_transitions and bear_to_bull and not tf_too_short ? bull_sticky : na,
+     title="Bear-Bull Wechsel", location=location.absolute,
+     style=shape.circle, color=color.green, size=size.large)
+
+// Warn-Label beim Unterschreiten der Schwelle
+plotshape(bull_sticky_warning and not tf_too_short ? bull_sticky : na,
+     title="Bull-Warnung", location=location.absolute,
+     style=shape.labeldown, color=color.orange,
+     text="WARN", textcolor=color.white, size=size.normal)
+
+// Bear-Warnung wenn Bear-Regime sich festigt
+plotshape(bear_sticky_warning and not tf_too_short ? bear_sticky : na,
+     title="Bear-Warnung", location=location.absolute,
+     style=shape.labelup, color=color.red,
+     text="BEAR!", textcolor=color.white, size=size.normal)
+
+// Kritische Warnung (Stufe 3): zusaetzlicher grosser Marker
+plotshape(bull_warn_level == 3 and blink_active and not tf_too_short ? sticky_warn_bull : na,
+     title="Kritische Warnung", location=location.absolute,
+     style=shape.triangledown, color=color.new(color.red, 0), size=size.large)
+
+// --- INFO-TABLE ---
+var table info = table.new(position.top_right, 2, 8,
+     bgcolor=color.new(color.black, 70),
+     border_color=color.new(color.gray, 40), border_width=1,
+     frame_color=color.new(color.gray, 30), frame_width=1)
+
+if barstate.islast
+    if tf_too_short
+        table.cell(info, 0, 0, "!! TIMEFRAME ZU KURZ !!",
+             text_color=color.red, text_size=size.normal,
+             bgcolor=color.new(color.red, 75))
+        table.cell(info, 1, 0, "",
+             bgcolor=color.new(color.red, 75))
+        table.cell(info, 0, 1, "Aktuell:",    text_color=color.silver, text_size=size.small)
+        table.cell(info, 1, 1, str.tostring(math.round(tf_minutes)) + " min",
+             text_color=color.orange, text_size=size.small)
+        table.cell(info, 0, 2, "Minimum:",    text_color=color.silver, text_size=size.small)
+        table.cell(info, 1, 2, recommended_tf, text_color=color.yellow, text_size=size.small)
+        table.cell(info, 0, 3, "Lookback:",   text_color=color.silver, text_size=size.small)
+        table.cell(info, 1, 3, str.tostring(lookback) + " Bars",
+             text_color=color.silver, text_size=size.small)
+        table.cell(info, 0, 4, "Ergebnis:",   text_color=color.silver, text_size=size.small)
+        table.cell(info, 1, 4, "Nur Rauschen",text_color=color.red,    text_size=size.small)
+        table.cell(info, 0, 5, "Empfehlung:", text_color=color.silver, text_size=size.small)
+        table.cell(info, 1, 5, "TF erhoehen", text_color=color.yellow, text_size=size.small)
+        table.cell(info, 0, 6, "oder Lookback reduzieren",
+             text_color=color.silver, text_size=size.small)
+        table.cell(info, 1, 6, "", text_color=color.silver, text_size=size.small)
+        table.cell(info, 0, 7, "", text_color=color.silver, text_size=size.small)
+        table.cell(info, 1, 7, "", text_color=color.silver, text_size=size.small)
+    else
+        regime_str = current_regime == 1 ? "BULL" : current_regime == -1 ? "BEAR" : "SIDE"
+        regime_col = current_regime == 1 ? color.green : current_regime == -1 ? color.red : color.gray
+
+        // Warn-Status Text und Farbe
+        warn_str = warn_level == 3 ? "KRITISCH!" :
+                   warn_level == 2 ? "Mittel" :
+                   warn_level == 1 ? "Leicht" : "OK"
+        warn_col = warn_level == 3 ? color.red :
+                   warn_level == 2 ? color.orange :
+                   warn_level == 1 ? color.yellow : color.green
+
+        // Warn-Zelle blinkt bei kritischer Stufe
+        warn_bg = warn_level == 3 and blink_active ?
+                  color.new(color.red, 50) : color.new(color.black, 70)
+
+        table.cell(info, 0, 0, "Regime",          text_color=color.silver, text_size=size.small)
+        table.cell(info, 1, 0, regime_str,         text_color=regime_col,   text_size=size.small)
+        table.cell(info, 0, 1, "Bull Sticky",      text_color=color.silver, text_size=size.small)
+        table.cell(info, 1, 1, str.tostring(bull_sticky, "#.1f") + "%",
+             text_color=bull_sticky < sticky_warn_bull ? color.orange : color.green,
+             text_size=size.small)
+        table.cell(info, 0, 2, "Bear Sticky",      text_color=color.silver, text_size=size.small)
+        table.cell(info, 1, 2, str.tostring(bear_sticky, "#.1f") + "%",
+             text_color=bear_sticky > sticky_warn_bear ? color.red : color.gray,
+             text_size=size.small)
+        table.cell(info, 0, 3, "Side Sticky",      text_color=color.silver, text_size=size.small)
+        table.cell(info, 1, 3, str.tostring(side_sticky, "#.1f") + "%",
+             text_color=color.gray, text_size=size.small)
+        table.cell(info, 0, 4, "Warnstufe",        text_color=color.silver, text_size=size.small)
+        table.cell(info, 1, 4, warn_str,           text_color=warn_col,
+             text_size=size.small,                 bgcolor=warn_bg)
+        table.cell(info, 0, 5, "Warn-Gap",         text_color=color.silver, text_size=size.small)
+        table.cell(info, 1, 5, str.tostring(math.max(bull_warn_gap, bear_warn_gap), "#.1f") + "%",
+             text_color=warn_col, text_size=size.small)
+        table.cell(info, 0, 6, "Timeframe",        text_color=color.silver, text_size=size.small)
+        table.cell(info, 1, 6, str.tostring(math.round(tf_minutes)) + " min (ok)",
+             text_color=color.green, text_size=size.small)
+        table.cell(info, 0, 7, "Lookback",         text_color=color.silver, text_size=size.small)
+        table.cell(info, 1, 7, str.tostring(lookback) + " Bars",
+             text_color=color.silver, text_size=size.small)
